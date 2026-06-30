@@ -32,6 +32,30 @@ router.get('/:id', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+// Products this customer has bought before — for one-tap reordering on a new
+// invoice. Returns each previously purchased product with how often/recently it
+// was ordered, the quantity and price on the most recent order, and live stock.
+router.get('/:id/history', async (req, res, next) => {
+  try {
+    const rows = await q(
+      `SELECT p.id AS product_id, p.name, p.sku, p.unit, p.price, p.stock,
+              SUM(ii.quantity)::int AS total_qty,
+              COUNT(DISTINCT ii.invoice_id)::int AS times_ordered,
+              MAX(i.created_at) AS last_ordered,
+              (ARRAY_AGG(ii.quantity ORDER BY i.created_at DESC))[1] AS last_qty,
+              (ARRAY_AGG(ii.price ORDER BY i.created_at DESC))[1] AS last_price
+       FROM invoice_items ii
+       JOIN invoices i ON i.id = ii.invoice_id
+       JOIN products p ON p.id = ii.product_id
+       WHERE i.customer_id = $1 AND i.status <> 'void' AND p.active = 1
+       GROUP BY p.id
+       ORDER BY times_ordered DESC, last_ordered DESC`,
+      [req.params.id]
+    );
+    res.json(rows.map((r) => ({ ...r, price: Number(r.price), last_price: Number(r.last_price) })));
+  } catch (e) { next(e); }
+});
+
 router.post('/', requireRole('admin', 'salesman'), async (req, res, next) => {
   try {
     const { name, contact, phone, email, address } = req.body || {};

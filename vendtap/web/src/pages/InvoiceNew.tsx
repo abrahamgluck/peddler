@@ -5,11 +5,26 @@ import type { Customer, Product, Invoice } from '../types';
 
 interface Line { product_id: number; quantity: number; }
 
+interface HistoryItem {
+  product_id: number;
+  name: string;
+  sku: string;
+  unit: string;
+  price: number;
+  stock: number;
+  total_qty: number;
+  times_ordered: number;
+  last_ordered: string;
+  last_qty: number;
+  last_price: number;
+}
+
 export default function InvoiceNew() {
   const nav = useNavigate();
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
   const [customerId, setCustomerId] = useState<number | ''>('');
+  const [history, setHistory] = useState<HistoryItem[]>([]);
   const [lines, setLines] = useState<Line[]>([]);
   const [note, setNote] = useState('');
   const [error, setError] = useState('');
@@ -20,8 +35,29 @@ export default function InvoiceNew() {
     api.get<Product[]>('/products').then(setProducts).catch(() => {});
   }, []);
 
+  // When the customer changes, load what they've bought before and start fresh.
+  useEffect(() => {
+    setLines([]);
+    setHistory([]);
+    if (!customerId) return;
+    api.get<HistoryItem[]>(`/customers/${customerId}/history`).then(setHistory).catch(() => {});
+  }, [customerId]);
+
   const byId = useMemo(() => Object.fromEntries(products.map((p) => [p.id, p])), [products]);
   const total = lines.reduce((s, l) => s + (byId[l.product_id]?.price || 0) * l.quantity, 0);
+  const inCart = (productId: number) => lines.some((l) => l.product_id === productId);
+
+  function addProduct(productId: number, qty: number) {
+    const p = byId[productId];
+    const capped = Math.max(1, Math.min(qty, p?.stock ?? qty));
+    setLines((prev) => (prev.some((l) => l.product_id === productId) ? prev : [...prev, { product_id: productId, quantity: capped }]));
+  }
+  function addAllHistory() {
+    const additions = history
+      .filter((h) => h.stock > 0 && !inCart(h.product_id))
+      .map((h) => ({ product_id: h.product_id, quantity: Math.max(1, Math.min(h.last_qty, h.stock)) }));
+    setLines((prev) => [...prev, ...additions]);
+  }
 
   function addLine() {
     const firstUnused = products.find((p) => !lines.some((l) => l.product_id === p.id));
@@ -65,7 +101,41 @@ export default function InvoiceNew() {
           </select>
         </div>
 
-        <div className="panel" style={{ marginTop: 6 }}>
+        {/* Quick reorder: everything this customer has bought before. */}
+        {customerId !== '' && (
+          <div className="panel" style={{ marginTop: 6 }}>
+            <div className="panel-head">
+              ⭐ Reorder — previously bought by this customer
+              {history.length > 0 && <button className="btn" onClick={addAllHistory}>+ Add all</button>}
+            </div>
+            {history.length === 0 ? (
+              <div style={{ padding: '14px 18px' }} className="muted">No prior orders for this customer yet.</div>
+            ) : (
+              <table>
+                <thead><tr><th>Product</th><th className="num">Last qty</th><th className="num">Last price</th><th className="num">Ordered</th><th className="num">In stock</th><th></th></tr></thead>
+                <tbody>
+                  {history.map((h) => (
+                    <tr key={h.product_id}>
+                      <td><strong>{h.name}</strong><br /><span className="muted">{h.sku}</span></td>
+                      <td className="num">{h.last_qty}</td>
+                      <td className="num">{money(h.last_price)}</td>
+                      <td className="num">{h.times_ordered}×</td>
+                      <td className="num">{h.stock}{h.stock <= 0 && <span className="badge void">out</span>}</td>
+                      <td className="right">
+                        <button className="btn ghost" disabled={inCart(h.product_id) || h.stock <= 0}
+                          onClick={() => addProduct(h.product_id, h.last_qty)}>
+                          {inCart(h.product_id) ? 'Added' : '+ Add'}
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        )}
+
+        <div className="panel" style={{ marginTop: 16 }}>
           <div className="panel-head">Line Items <button className="btn ghost" onClick={addLine} disabled={lines.length >= products.length}>+ Add product</button></div>
           <table>
             <thead><tr><th>Product</th><th className="num">Stock</th><th className="num">Price</th><th style={{ width: 110 }}>Qty</th><th className="num">Line total</th><th></th></tr></thead>
@@ -87,7 +157,7 @@ export default function InvoiceNew() {
                   </tr>
                 );
               })}
-              {lines.length === 0 && <tr><td colSpan={6} className="muted">No items yet — add a product</td></tr>}
+              {lines.length === 0 && <tr><td colSpan={6} className="muted">No items yet — add from the reorder list above or pick a product</td></tr>}
             </tbody>
           </table>
         </div>
