@@ -1,7 +1,7 @@
 // Authentication helpers: password hashing + JWT issue/verify middleware.
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
-import { db } from './db.js';
+import { one } from './db.js';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'vendtap-dev-secret-change-me';
 const TOKEN_TTL = '12h';
@@ -23,13 +23,13 @@ export function issueToken(user) {
 }
 
 // Express middleware: require a valid Bearer token. Attaches req.user.
-export function requireAuth(req, res, next) {
+export async function requireAuth(req, res, next) {
   const header = req.headers.authorization || '';
   const token = header.startsWith('Bearer ') ? header.slice(7) : null;
   if (!token) return res.status(401).json({ error: 'Missing token' });
   try {
     const payload = jwt.verify(token, JWT_SECRET);
-    const user = db.prepare('SELECT id, username, name, role FROM users WHERE id = ?').get(payload.sub);
+    const user = await one('SELECT id, username, name, role FROM users WHERE id = $1', [payload.sub]);
     if (!user) return res.status(401).json({ error: 'Invalid token' });
     req.user = user;
     next();

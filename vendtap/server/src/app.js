@@ -6,7 +6,6 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { existsSync } from 'node:fs';
 
-import './db.js'; // ensure schema is created
 import authRoutes from './routes/auth.js';
 import productRoutes from './routes/products.js';
 import customerRoutes from './routes/customers.js';
@@ -32,6 +31,9 @@ export function createApp() {
   app.use('/api/trucks', truckRoutes);
   app.use('/api/reports', reportRoutes);
 
+  // JSON 404 for unknown API routes.
+  app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
+
   // Serve the built SPA if present (production build).
   const dist = join(__dirname, '..', '..', 'web', 'dist');
   if (existsSync(dist)) {
@@ -42,8 +44,11 @@ export function createApp() {
     });
   }
 
-  // JSON 404 for unknown API routes.
-  app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
+  // Centralized error handler.
+  app.use((err, req, res, _next) => {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  });
 
   return app;
 }

@@ -1,53 +1,68 @@
 // Customer (store) routes.
 import { Router } from 'express';
-import { db } from '../db.js';
+import { q, one } from '../db.js';
 import { requireAuth, requireRole } from '../auth.js';
 
 const router = Router();
 router.use(requireAuth);
 
-router.get('/', (req, res) => {
-  const { search } = req.query;
-  let sql = 'SELECT * FROM customers';
-  const params = [];
-  if (search) {
-    sql += ' WHERE name LIKE ? OR contact LIKE ? OR phone LIKE ?';
-    const like = `%${search}%`;
-    params.push(like, like, like);
-  }
-  sql += ' ORDER BY name';
-  res.json(db.prepare(sql).all(...params));
+router.get('/', async (req, res, next) => {
+  try {
+    const { search } = req.query;
+    const params = [];
+    let sql = 'SELECT * FROM customers';
+    if (search) {
+      params.push(`%${search}%`);
+      sql += ` WHERE name ILIKE $1 OR contact ILIKE $1 OR phone ILIKE $1`;
+    }
+    sql += ' ORDER BY name';
+    res.json(await q(sql, params));
+  } catch (e) { next(e); }
 });
 
-router.get('/:id', (req, res) => {
-  const customer = db.prepare('SELECT * FROM customers WHERE id = ?').get(req.params.id);
-  if (!customer) return res.status(404).json({ error: 'Not found' });
-  const invoices = db
-    .prepare('SELECT * FROM invoices WHERE customer_id = ? ORDER BY created_at DESC LIMIT 50')
-    .all(req.params.id);
-  res.json({ ...customer, invoices });
+router.get('/:id', async (req, res, next) => {
+  try {
+    const customer = await one('SELECT * FROM customers WHERE id = $1', [req.params.id]);
+    if (!customer) return res.status(404).json({ error: 'Not found' });
+    const invoices = await q(
+      'SELECT * FROM invoices WHERE customer_id = $1 ORDER BY created_at DESC LIMIT 50',
+      [req.params.id]
+    );
+    res.json({ ...customer, invoices });
+  } catch (e) { next(e); }
 });
 
-router.post('/', requireRole('admin', 'salesman'), (req, res) => {
-  const { name, contact, phone, email, address } = req.body || {};
-  if (!name) return res.status(400).json({ error: 'name is required' });
-  const info = db
-    .prepare('INSERT INTO customers (name, contact, phone, email, address) VALUES (?, ?, ?, ?, ?)')
-    .run(name, contact || null, phone || null, email || null, address || null);
-  res.status(201).json(db.prepare('SELECT * FROM customers WHERE id = ?').get(info.lastInsertRowid));
+router.post('/', requireRole('admin', 'salesman'), async (req, res, next) => {
+  try {
+    const { name, contact, phone, email, address } = req.body || {};
+    if (!name) return res.status(400).json({ error: 'name is required' });
+    const row = await one(
+      'INSERT INTO customers (name, contact, phone, email, address) VALUES ($1, $2, $3, $4, $5) RETURNING *',
+      [name, contact || null, phone || null, email || null, address || null]
+    );
+    res.status(201).json(row);
+  } catch (e) { next(e); }
 });
 
-router.put('/:id', requireRole('admin', 'salesman'), (req, res) => {
-  const existing = db.prepare('SELECT * FROM customers WHERE id = ?').get(req.params.id);
-  if (!existing) return res.status(404).json({ error: 'Not found' });
-  const fields = ['name', 'contact', 'phone', 'email', 'address'];
-  const updates = {};
-  for (const f of fields) if (f in (req.body || {})) updates[f] = req.body[f];
-  if (Object.keys(updates).length) {
-    const set = Object.keys(updates).map((k) => `${k} = ?`).join(', ');
-    db.prepare(`UPDATE customers SET ${set} WHERE id = ?`).run(...Object.values(updates), req.params.id);
-  }
-  res.json(db.prepare('SELECT * FROM customers WHERE id = ?').get(req.params.id));
+router.put('/:id', requireRole('admin', 'salesman'), async (req, res, next) => {
+  try {
+    const existing = await one('SELECT * FROM customers WHERE id = $1', [req.params.id]);
+    if (!existing) return res.status(404).json({ error: 'Not found' });
+    const fields = ['name', 'contact', 'phone', 'email', 'address'];
+    const updates = [];
+    const values = [];
+    for (const f of fields) {
+      if (f in (req.body || {})) {
+        values.push(req.body[f]);
+        updates.push(`${f} = $${values.length}`);
+      }
+    }
+    if (updates.length) {
+      values.push(req.params.id);
+      await q(`UPDATE customers SET ${updates.join(', ')} WHERE id = $${values.length}`, values);
+    }
+    res.json(await one('SELECT * FROM customers WHERE id = $1', [req.params.id]));
+  } catch (e) { next(e); }
 });
 
 export default router;

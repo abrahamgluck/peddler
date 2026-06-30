@@ -1,21 +1,8 @@
 // Seed the database with demo users, products, customers, trucks, and a few
 // invoices/payments so the app is immediately explorable.
-import { db } from './db.js';
+// Safe to run repeatedly: it truncates the domain tables first.
+import { pool, initSchema, tx } from './db.js';
 import { hashPassword } from './auth.js';
-
-function reset() {
-  db.exec(`
-    DELETE FROM inventory_ledger;
-    DELETE FROM payments;
-    DELETE FROM invoice_items;
-    DELETE FROM invoices;
-    DELETE FROM trucks;
-    DELETE FROM customers;
-    DELETE FROM products;
-    DELETE FROM users;
-    DELETE FROM sqlite_sequence;
-  `);
-}
 
 const users = [
   // The login the user provided maps to the admin account.
@@ -42,95 +29,121 @@ const customers = [
   { name: 'Sunrise Convenience', contact: 'Aisha Khan', phone: '718-555-0193', email: 'aisha@sunrisestore.com', address: '300 Sunrise Hwy, Queens, NY' },
 ];
 
-const trucks = [
-  { name: 'Truck 1 - Box', plate: 'NY-VT-101', status: 'idle' },
-  { name: 'Truck 2 - Van', plate: 'NY-VT-102', status: 'on_route' },
-];
+// Seed the database. Reusable by both the CLI (`npm run seed`) and the
+// server's optional auto-seed on first boot.
+export async function seedDatabase() {
+  await initSchema();
 
-function run() {
-  reset();
+  await tx(async (client) => {
+    await client.query(`
+      TRUNCATE inventory_ledger, payments, invoice_items, invoices, trucks, customers, products, users
+      RESTART IDENTITY CASCADE
+    `);
 
-  const insUser = db.prepare('INSERT INTO users (username, password_hash, name, role) VALUES (?, ?, ?, ?)');
-  const userIds = {};
-  for (const u of users) {
-    const info = insUser.run(u.username, hashPassword(u.password), u.name, u.role);
-    userIds[u.username] = info.lastInsertRowid;
-  }
+    const userIds = {};
+    for (const u of users) {
+      const { rows } = await client.query(
+        'INSERT INTO users (username, password_hash, name, role) VALUES ($1, $2, $3, $4) RETURNING id',
+        [u.username, hashPassword(u.password), u.name, u.role]
+      );
+      userIds[u.username] = rows[0].id;
+    }
 
-  const insProduct = db.prepare(
-    'INSERT INTO products (sku, name, category, unit, cost, price, stock, reorder_level) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
-  );
-  const productIds = [];
-  for (const p of products) {
-    const info = insProduct.run(p.sku, p.name, p.category, p.unit, p.cost, p.price, p.stock, p.reorder_level);
-    productIds.push(info.lastInsertRowid);
-  }
+    const productIds = [];
+    for (const p of products) {
+      const { rows } = await client.query(
+        'INSERT INTO products (sku, name, category, unit, cost, price, stock, reorder_level) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id',
+        [p.sku, p.name, p.category, p.unit, p.cost, p.price, p.stock, p.reorder_level]
+      );
+      productIds.push(rows[0].id);
+    }
 
-  const insCustomer = db.prepare('INSERT INTO customers (name, contact, phone, email, address) VALUES (?, ?, ?, ?, ?)');
-  const customerIds = [];
-  for (const c of customers) {
-    const info = insCustomer.run(c.name, c.contact, c.phone, c.email, c.address);
-    customerIds.push(info.lastInsertRowid);
-  }
+    const customerIds = [];
+    for (const c of customers) {
+      const { rows } = await client.query(
+        'INSERT INTO customers (name, contact, phone, email, address) VALUES ($1,$2,$3,$4,$5) RETURNING id',
+        [c.name, c.contact, c.phone, c.email, c.address]
+      );
+      customerIds.push(rows[0].id);
+    }
 
-  const insTruck = db.prepare('INSERT INTO trucks (name, plate, status, driver_id) VALUES (?, ?, ?, ?)');
-  insTruck.run(trucks[0].name, trucks[0].plate, trucks[0].status, userIds['sam']);
-  insTruck.run(trucks[1].name, trucks[1].plate, trucks[1].status, userIds['sam']);
+    await client.query('INSERT INTO trucks (name, plate, status, driver_id) VALUES ($1,$2,$3,$4)', ['Truck 1 - Box', 'NY-VT-101', 'idle', userIds['sam']]);
+    await client.query('INSERT INTO trucks (name, plate, status, driver_id) VALUES ($1,$2,$3,$4)', ['Truck 2 - Van', 'NY-VT-102', 'on_route', userIds['sam']]);
 
-  // A couple of demo invoices using the same logic the API uses.
-  const demoInvoices = [
-    { customer: 0, salesman: 'sam', items: [{ p: 0, q: 5 }, { p: 3, q: 2 }], pay: 'full' },
-    { customer: 1, salesman: 'sam', items: [{ p: 1, q: 10 }, { p: 4, q: 1 }], pay: 'partial' },
-    { customer: 2, salesman: 'Gluck1', items: [{ p: 2, q: 3 }], pay: 'none' },
-  ];
+    // A few demo invoices using the same logic the API uses.
+    const demoInvoices = [
+      { customer: 0, salesman: 'sam', items: [{ p: 0, q: 5 }, { p: 3, q: 2 }], pay: 'full' },
+      { customer: 1, salesman: 'sam', items: [{ p: 1, q: 10 }, { p: 4, q: 1 }], pay: 'partial' },
+      { customer: 2, salesman: 'Gluck1', items: [{ p: 2, q: 3 }], pay: 'none' },
+    ];
 
-  let counter = 0;
-  for (const inv of demoInvoices) {
-    counter += 1;
-    const number = `INV-${String(counter).padStart(5, '0')}`;
-    const lines = inv.items.map((it) => {
-      const product = db.prepare('SELECT * FROM products WHERE id = ?').get(productIds[it.p]);
-      return { product, qty: it.q, price: product.price, lineTotal: +(product.price * it.q).toFixed(2) };
-    });
-    const subtotal = +lines.reduce((s, l) => s + l.lineTotal, 0).toFixed(2);
-    const total = subtotal; // tax-free resale demo
-
-    const tx = db.transaction(() => {
-      const info = db
-        .prepare(
-          `INSERT INTO invoices (number, customer_id, salesman_id, status, subtotal, tax, total, paid)
-           VALUES (?, ?, ?, 'open', ?, 0, ?, 0)`
-        )
-        .run(number, customerIds[inv.customer], userIds[inv.salesman], subtotal, total);
-      const invoiceId = info.lastInsertRowid;
-      for (const l of lines) {
-        db.prepare(
-          `INSERT INTO invoice_items (invoice_id, product_id, description, quantity, price, line_total)
-           VALUES (?, ?, ?, ?, ?, ?)`
-        ).run(invoiceId, l.product.id, l.product.name, l.qty, l.price, l.lineTotal);
-        db.prepare('UPDATE products SET stock = stock - ? WHERE id = ?').run(l.qty, l.product.id);
-        db.prepare('INSERT INTO inventory_ledger (product_id, change, reason, ref) VALUES (?, ?, ?, ?)')
-          .run(l.product.id, -l.qty, 'sale', number);
+    let counter = 0;
+    for (const inv of demoInvoices) {
+      counter += 1;
+      const number = `INV-${String(counter).padStart(5, '0')}`;
+      const lines = [];
+      for (const it of inv.items) {
+        const { rows } = await client.query('SELECT * FROM products WHERE id = $1', [productIds[it.p]]);
+        const product = rows[0];
+        lines.push({ product, qty: it.q, price: product.price, lineTotal: +(product.price * it.q).toFixed(2) });
       }
-      db.prepare('UPDATE customers SET balance = balance + ? WHERE id = ?').run(total, customerIds[inv.customer]);
+      const subtotal = +lines.reduce((s, l) => s + l.lineTotal, 0).toFixed(2);
+      const total = subtotal;
+
+      const { rows: invRows } = await client.query(
+        `INSERT INTO invoices (number, customer_id, salesman_id, status, subtotal, tax, total, paid)
+         VALUES ($1,$2,$3,'open',$4,0,$5,0) RETURNING id`,
+        [number, customerIds[inv.customer], userIds[inv.salesman], subtotal, total]
+      );
+      const invoiceId = invRows[0].id;
+      for (const l of lines) {
+        await client.query(
+          `INSERT INTO invoice_items (invoice_id, product_id, description, quantity, price, line_total)
+           VALUES ($1,$2,$3,$4,$5,$6)`,
+          [invoiceId, l.product.id, l.product.name, l.qty, l.price, l.lineTotal]
+        );
+        await client.query('UPDATE products SET stock = stock - $1 WHERE id = $2', [l.qty, l.product.id]);
+        await client.query('INSERT INTO inventory_ledger (product_id, change, reason, ref) VALUES ($1,$2,$3,$4)', [l.product.id, -l.qty, 'sale', number]);
+      }
+      await client.query('UPDATE customers SET balance = balance + $1 WHERE id = $2', [total, customerIds[inv.customer]]);
 
       if (inv.pay !== 'none') {
         const amount = inv.pay === 'full' ? total : +(total / 2).toFixed(2);
-        db.prepare('INSERT INTO payments (invoice_id, amount, method, received_by) VALUES (?, ?, ?, ?)')
-          .run(invoiceId, amount, 'cash', userIds[inv.salesman]);
+        await client.query('INSERT INTO payments (invoice_id, amount, method, received_by) VALUES ($1,$2,$3,$4)', [invoiceId, amount, 'cash', userIds[inv.salesman]]);
         const status = amount >= total - 0.001 ? 'paid' : 'partial';
-        db.prepare('UPDATE invoices SET paid = ?, status = ? WHERE id = ?').run(amount, status, invoiceId);
-        db.prepare('UPDATE customers SET balance = balance - ? WHERE id = ?').run(amount, customerIds[inv.customer]);
+        await client.query('UPDATE invoices SET paid = $1, status = $2 WHERE id = $3', [amount, status, invoiceId]);
+        await client.query('UPDATE customers SET balance = balance - $1 WHERE id = $2', [amount, customerIds[inv.customer]]);
       }
-    });
-    tx();
-  }
+    }
 
-  console.log('Seed complete:');
-  console.log(`  users:     ${users.length} (login Gluck1 / 5310)`);
-  console.log(`  products:  ${products.length}`);
-  console.log(`  customers: ${customers.length}`);
-  console.log(`  invoices:  ${demoInvoices.length}`);
+    console.log('Seed complete:');
+    console.log(`  users:     ${users.length} (login Gluck1 / 5310)`);
+    console.log(`  products:  ${products.length}`);
+    console.log(`  customers: ${customers.length}`);
+    console.log(`  invoices:  ${demoInvoices.length}`);
+  });
 }
 
-run();
+// Seed only if the database has no users yet. Used for one-click deploys so the
+// demo login works immediately without a manual seed step.
+export async function seedIfEmpty() {
+  await initSchema();
+  const existing = await pool.query('SELECT COUNT(*)::int AS n FROM users');
+  if (existing.rows[0].n > 0) {
+    console.log('Database already has data — skipping auto-seed.');
+    return;
+  }
+  console.log('Empty database detected — seeding demo data…');
+  await seedDatabase();
+}
+
+// When run directly (`npm run seed`), seed and close the pool.
+const isCli = process.argv[1] && process.argv[1].endsWith('seed.js');
+if (isCli) {
+  seedDatabase()
+    .then(() => pool.end())
+    .catch((err) => {
+      console.error('Seed failed:', err);
+      process.exit(1);
+    });
+}

@@ -27,10 +27,12 @@ delivery fleet, and everyone shares the same daily / weekly / monthly reports.
 
 ## Tech stack
 
-- **Backend** — Node.js + Express, SQLite (`better-sqlite3`), JWT auth, bcrypt
+- **Backend** — Node.js + Express, **PostgreSQL** (`pg`), JWT auth, bcrypt
   password hashing. Pure REST JSON API under `/api`.
 - **Frontend** — React + TypeScript + Vite, React Router. Responsive layout that
   works on a phone for salesmen in the field.
+- **Deploy** — one-click [Render Blueprint](#deploy-to-the-cloud) provisions the
+  web service **and** a managed Postgres database.
 
 ## Project layout
 
@@ -50,30 +52,50 @@ vendtap/
         └── pages/       # Login, Dashboard, Products, Customers, Invoices, Trucks, Reports
 ```
 
-## Getting started
+## Deploy to the cloud
 
-### 1. Backend
+This is the recommended way to run it as a hosted SaaS. The repo ships a
+[`render.yaml`](../render.yaml) Blueprint that provisions a web service **and** a
+managed Postgres database, wired together automatically.
+
+1. Push this repo to your GitHub account (already done if you're reading this there).
+2. Create a free account at **[render.com](https://render.com)**.
+3. In the dashboard: **New → Blueprint**, pick this repository, and confirm.
+4. Render builds the app, creates the database, generates a `JWT_SECRET`, and
+   (because `SEED_ON_START=1`) loads the demo data on first boot.
+5. Open the service URL and sign in with **`Gluck1` / `5310`**.
+
+> The free tier spins the web service down after inactivity (first request after
+> idle takes ~30s) and the free database is time-limited — fine for a demo. Bump
+> both to a paid instance for always-on production use.
+
+## Local development
+
+Requires **Node 18+** and a **PostgreSQL** database.
 
 ```bash
+# 1. Start a local Postgres (any of these works)
+docker run -d --name vtpg -e POSTGRES_PASSWORD=vt -e POSTGRES_DB=vendtap -p 5432:5432 postgres:16
+#   …or use an existing Postgres and set DATABASE_URL accordingly.
+
+# 2. Backend
 cd vendtap/server
+cp .env.example .env          # adjust DATABASE_URL if needed
 npm install
-npm run seed      # creates vendtap.db with demo data
-npm start         # http://localhost:4000
-```
+npm run seed                  # load demo data
+npm start                     # http://localhost:4000
 
-### 2. Frontend
-
-```bash
+# 3. Frontend (separate terminal)
 cd vendtap/web
 npm install
-npm run dev       # http://localhost:5173 (proxies /api to :4000)
+npm run dev                   # http://localhost:5173 (proxies /api to :4000)
 ```
 
 Open http://localhost:5173 and sign in.
 
-### Production (single server)
+### Single-server production build
 
-Build the SPA and let Express serve it:
+Build the SPA and let Express serve it from one process:
 
 ```bash
 cd vendtap/web && npm install && npm run build
@@ -110,9 +132,10 @@ All routes except `POST /api/auth/login` require an `Authorization: Bearer <toke
 
 | Env var | Default | Notes |
 | --- | --- | --- |
+| `DATABASE_URL` | `postgresql://vt:vt@127.0.0.1:5432/vendtap` | Postgres connection string |
 | `PORT` | `4000` | API/server port |
 | `JWT_SECRET` | dev secret | **Set in production** |
-| `VENDTAP_DB` | `server/vendtap.db` | SQLite file path |
+| `SEED_ON_START` | `0` | `1` = auto-seed demo data on boot if DB is empty |
 | `TAX_RATE` | `0` | Applied to invoice subtotals (resale is often tax-exempt) |
 
 ## License
